@@ -7,7 +7,7 @@ import time
 # ==========================================
 # 🔑 API CONFIG
 # ==========================================
-MY_API_KEY = "akr4lUAIsmZqm0lTH60LPdGhCbnxeICg"
+MY_API_KEY = "83er2dk81kwOnOoNUBw1vItcD2GIH98L"
 # ==========================================
 
 st.set_page_config(page_title="Global Macro: Nifty Impact", layout="wide")
