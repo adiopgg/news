@@ -31,7 +31,51 @@ BENCHMARK_LOGIC = {
     "payroll": 1, "earnings": 1, "sentiment": 1, "order": 1
 }
 
-# --- 3. LOGIC ENGINE ---
+# --- 3. DATA FETCH (STRENGTHENED) ---
+@st.cache_data(ttl=30)
+def get_live_data(dt):
+    try:
+        # We fetch a wider range because global news (like BoJ) 
+        # often hits 'yesterday' or 'tomorrow' in US-centric APIs.
+        start = (dt - timedelta(days=2)).strftime("%Y-%m-%d")
+        end = (dt + timedelta(days=2)).strftime("%Y-%m-%d")
+        
+        # CHANGED: Using v3 endpoint (more stable for free keys)
+        url = f"https://financialmodelingprep.com/api/v3/economic_calendar"
+        params = {"from": start, "to": end, "apikey": MY_API_KEY}
+        
+        res = requests.get(url, params=params, timeout=15)
+        
+        if res.status_code == 403:
+            st.error("🚫 API Key Error: Please check if your key is active.")
+            return pd.DataFrame()
+            
+        data = res.json()
+        if isinstance(data, list) and len(data) > 0:
+            df = pd.DataFrame(data)
+            # Normalize dates to handle different API formats
+            df['dt_obj'] = pd.to_datetime(df['date']).dt.date
+            return df
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"📡 Connection Issue: {e}")
+        return pd.DataFrame()
+
+# --- 4. SIDEBAR ---
+st.sidebar.title("Global Controls")
+target_date = st.sidebar.date_input("Calendar Date", value=date.today())
+impact_filter = st.sidebar.multiselect("Impact", ['High', 'Medium', 'Low'], default=['High', 'Medium', 'Low'])
+country_filter = st.sidebar.multiselect(
+    "Nifty Drivers", 
+    ['IN', 'US', 'CN', 'EU', 'GB', 'JP'], 
+    default=['IN', 'US', 'CN', 'EU', 'JP', 'GB']
+)
+
+if st.sidebar.button("🔄 Clear Cache & Force Update"):
+    st.cache_data.clear()
+    st.rerun()
+
+# --- 5. LOGIC ENGINE ---
 def calculate_nse_global_logic(row):
     event = str(row.get('event', '')).lower()
     country = str(row.get('country', '')).upper()
@@ -44,11 +88,10 @@ def calculate_nse_global_logic(row):
     try:
         a, e = float(act), float(est)
         if a == e: return pd.Series(["val-black", "Neutral"])
-        
         direction = next((v for k, v in BENCHMARK_LOGIC.items() if k in event), 1)
         is_pos = (a > e and direction == 1) or (a < e and direction == -1)
         color_class = "val-green" if is_pos else "val-red"
-            
+        
         if country == 'IN': nse_sentiment = "Bullish" if is_pos else "Bearish"
         elif country in ['US', 'CN']: nse_sentiment = "Bearish" if is_pos else "Bullish"
         elif country in ['EU', 'GB']: nse_sentiment = "Bullish" if is_pos else "Bearish"
@@ -56,103 +99,62 @@ def calculate_nse_global_logic(row):
     except: pass
     return pd.Series([color_class, nse_sentiment])
 
-# --- 4. DATA FETCH (3-DAY SAFETY WINDOW) ---
-@st.cache_data(ttl=20)
-def get_live_data(dt):
-    try:
-        # Fetch window: Yesterday to Tomorrow
-        start = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
-        end = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
-        
-        url = "https://financialmodelingprep.com/stable/economic-calendar"
-        params = {"from": start, "to": end, "apikey": MY_API_KEY}
-        headers = {"Cache-Control": "no-cache"}
-        
-        res = requests.get(url, params=params, headers=headers, timeout=10)
-        if res.status_code == 200:
-            full_df = pd.DataFrame(res.json())
-            if not full_df.empty:
-                # Convert API date strings to actual date objects for comparison
-                full_df['dt_obj'] = pd.to_datetime(full_df['date']).dt.date
-                # Only return the rows that match the user's selected date
-                return full_df[full_df['dt_obj'] == dt]
-        return pd.DataFrame()
-    except:
-        return pd.DataFrame()
+# --- 6. DASHBOARD RENDER ---
+st.title(f"🌍 Global Nifty Macro Calendar")
+st.caption(f"Last Sync: {time.strftime('%H:%M:%S')}")
 
-# --- 5. SIDEBAR ---
-st.sidebar.title("Global Controls")
-target_date = st.sidebar.date_input("Calendar Date", value=date.today())
-impact_filter = st.sidebar.multiselect("Impact", ['High', 'Medium', 'Low'], default=['High', 'Medium'])
-country_filter = st.sidebar.multiselect(
-    "Nifty Drivers", 
-    ['IN', 'US', 'CN', 'EU', 'GB', 'JP'], 
-    default=['IN', 'US', 'CN', 'EU', 'JP', 'GB']
-)
+raw_df = get_live_data(target_date)
 
-st.sidebar.markdown("---")
-live_mode = st.sidebar.toggle("Auto-Refresh (30s)", value=True)
-
-if st.sidebar.button("🔄 Force Refresh API"):
-    st.cache_data.clear()
-    st.rerun()
-
-# --- 6. DASHBOARD FRAGMENT ---
-@st.fragment(run_every="30s" if live_mode else None)
-def show_dashboard(dt, impacts, countries):
-    df = get_live_data(dt)
+if not raw_df.empty:
+    # Filter for the specific date selected
+    df = raw_df[raw_df['dt_obj'] == target_date].copy()
     
-    st.title(f"🌍 Global Nifty Macro Calendar")
-    st.caption(f"Last Sync: {time.strftime('%H:%M:%S')} | Target: {dt.strftime('%d %b %Y')}")
+    if df.empty:
+        st.warning(f"No events found specifically for {target_date}. Showing next available news:")
+        # Show the very next available news so the screen isn't empty
+        df = raw_df[raw_df['dt_obj'] > target_date].head(5).copy()
 
-    if not df.empty:
-        # Initial Logic Run
-        df[['Color', 'NSE_Sent']] = df.apply(calculate_nse_global_logic, axis=1)
+    # Apply remaining filters
+    df = df[df['impact'].isin(impact_filter)]
+    if country_filter:
+        df = df[df['country'].isin(country_filter)]
+
+    # Calculate Logic
+    df[['Color', 'NSE_Sent']] = df.apply(calculate_nse_global_logic, axis=1)
+
+    # --- RENDER TABLE ---
+    st.markdown("""
+        <div class="ff-row" style="background:#f4f4f4; border-top:2px solid #333; margin-top:10px;">
+            <div style="width:10%" class="ff-header-text">Time</div>
+            <div style="width:8%" class="ff-header-text">Cur</div>
+            <div style="width:8%" class="ff-header-text">Imp</div>
+            <div style="width:40%" class="ff-header-text">Detail</div>
+            <div style="width:11%" class="ff-header-text">Actual</div>
+            <div style="width:11%" class="ff-header-text">Forecast</div>
+            <div style="width:12%" class="ff-header-text">Nifty Impact</div>
+        </div>
+    """, unsafe_allow_html=True)
+
+    for _, row in df.sort_values('date').iterrows():
+        time_str = row['date'].split(" ")[1][:5] if " " in row['date'] else "Day"
+        icon = "🔴" if row['impact'] == 'High' else "🟠" if row['impact'] == 'Medium' else "🟡"
+        curr_map = {'IN':'INR', 'US':'USD', 'CN':'CNY', 'EU':'EUR', 'GB':'GBP', 'JP':'JPY'}
+        curr = curr_map.get(row['country'], row['country'])
         
-        # Filtering
-        df = df[df['impact'].isin(impacts)]
-        if countries:
-            df = df[df['country'].isin(countries)]
+        s_color = "#00ff41" if row['NSE_Sent'] == "Bullish" else "#ff4b4b" if row['NSE_Sent'] == "Bearish" else "#808495"
+        s_label = f"<span style='color:{s_color}; font-weight:bold;'>{row['NSE_Sent']}</span>"
+        act_disp = row['actual'] if pd.notna(row['actual']) and str(row['actual']).strip() != "" else "⏳"
 
-        # Table Header
-        st.markdown("""
-            <div class="ff-row" style="background:#f4f4f4; border-top:2px solid #333; margin-top:10px;">
-                <div style="width:10%" class="ff-header-text">Time</div>
-                <div style="width:8%" class="ff-header-text">Cur</div>
-                <div style="width:8%" class="ff-header-text">Imp</div>
-                <div style="width:40%" class="ff-header-text">Detail</div>
-                <div style="width:11%" class="ff-header-text">Actual</div>
-                <div style="width:11%" class="ff-header-text">Forecast</div>
-                <div style="width:12%" class="ff-header-text">Nifty Impact</div>
+        st.markdown(f"""
+            <div class="ff-row">
+                <div style="width:10%">{time_str}</div>
+                <div style="width:8%; font-weight:bold;">{curr}</div>
+                <div style="width:8%">{icon}</div>
+                <div style="width:40%">{row['event']}</div>
+                <div style="width:11%" class="{row['Color']}">{act_disp}</div>
+                <div style="width:11%">{row['estimate'] if pd.notna(row['estimate']) else ''}</div>
+                <div style="width:12%">{s_label}</div>
             </div>
         """, unsafe_allow_html=True)
-
-        # Table Rows
-        for _, row in df.sort_values('date').iterrows():
-            time_str = row['date'].split(" ")[1][:5] if " " in row['date'] else "Day"
-            icon = "🔴" if row['impact'] == 'High' else "🟠" if row['impact'] == 'Medium' else "🟡"
-            curr_map = {'IN':'INR', 'US':'USD', 'CN':'CNY', 'EU':'EUR', 'GB':'GBP', 'JP':'JPY'}
-            curr = curr_map.get(row['country'], row['country'])
-            
-            s_color = "#00ff41" if row['NSE_Sent'] == "Bullish" else "#ff4b4b" if row['NSE_Sent'] == "Bearish" else "#808495"
-            s_label = f"<span style='color:{s_color}; font-weight:bold;'>{row['NSE_Sent']}</span>"
-            
-            act_val = row['actual']
-            act_disp = act_val if pd.notna(act_val) and str(act_val).strip() != "" else "⏳"
-
-            st.markdown(f"""
-                <div class="ff-row">
-                    <div style="width:10%">{time_str}</div>
-                    <div style="width:8%; font-weight:bold;">{curr}</div>
-                    <div style="width:8%">{icon}</div>
-                    <div style="width:40%">{row['event']}</div>
-                    <div style="width:11%" class="{row['Color']}">{act_disp}</div>
-                    <div style="width:11%">{row['estimate'] if pd.notna(row['estimate']) else ''}</div>
-                    <div style="width:12%">{s_label}</div>
-                </div>
-            """, unsafe_allow_html=True)
-    else:
-        st.info("No data found for this specific date. Try selecting another date or hit refresh.")
-
-# Start
-show_dashboard(target_date, impact_filter, country_filter)
+else:
+    st.error("Failed to retrieve any data. This usually means the API key has reached its daily limit or the connection is blocked.")
