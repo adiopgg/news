@@ -1,313 +1,138 @@
 import streamlit as st
-
 import pandas as pd
-
 import requests
-
-from datetime import date, timedelta
-
+from datetime import date
 import time
 
-
-
 # ==========================================
-
 # 🔑 API CONFIG
-
 # ==========================================
-
 MY_API_KEY = "akr4lUAIsmZqm0lTH60LPdGhCbnxeICg"
-
 # ==========================================
-
-
 
 st.set_page_config(page_title="Global Macro: Nifty Impact", layout="wide")
 
-
-
 # --- 1. UI STYLING ---
-
 st.markdown("""
-
     <style>
-
     .main { background: #ffffff; color: #333; }
-
     .ff-header-text { color: #000000 !important; font-weight: bold !important; font-size: 14px; }
-
     .ff-row { border-bottom: 1px solid #e0e0e0; padding: 8px 0; display: flex; align-items: center; }
-
     .val-green { color: #008000; font-weight: bold; }
-
     .val-red { color: #cc0000; font-weight: bold; }
-
     .val-black { color: #000000; }
-
     </style>
-
     """, unsafe_allow_html=True)
 
-
-
-# --- 2. THE LOGIC MAP (Benchmarking Higher/Lower) ---
-
+# --- 2. BENCHMARK LOGIC ---
 BENCHMARK_LOGIC = {
-
     "cpi": -1, "inflation": -1, "ppi": -1, "unemployment": -1, "jobless": -1,
-
     "gdp": 1, "pmi": 1, "sales": 1, "production": 1, "confidence": 1,
-
     "payroll": 1, "earnings": 1, "sentiment": 1, "order": 1
-
 }
 
-
-
-# --- 3. SIDEBAR CONTROLS (Persistent State) ---
-
+# --- 3. SIDEBAR ---
 st.sidebar.title("Global Controls")
+live_mode = st.sidebar.toggle("Live Market Mode (Auto-Refresh)", value=True)
 
-
-
-# REFRESH FIX: Clear cache but keep widget state
-
-if st.sidebar.button("🔄 Force Refresh Data"):
-
+if st.sidebar.button("🔄 Force Refresh Now"):
     st.cache_data.clear()
-
-
+    st.rerun()
 
 target_date = st.sidebar.date_input("Calendar Date", value=date.today())
-
 impact_filter = st.sidebar.multiselect("Impact", ['High', 'Medium', 'Low'], default=['High', 'Medium'])
-
 country_filter = st.sidebar.multiselect(
-
     "Nifty Drivers", 
-
     ['IN', 'US', 'CN', 'EU', 'GB', 'JP'], 
-
     default=['IN', 'US', 'CN', 'EU', 'JP', 'GB']
-
 )
 
-
-
-# --- 4. MULTI-COUNTRY NSE LOGIC ENGINE ---
-
+# --- 4. ENGINE ---
 def calculate_nse_global_logic(row):
-
     event = str(row.get('event', '')).lower()
-
     country = str(row.get('country', '')).upper()
-
     act, est = row.get('actual'), row.get('estimate')
-
-    
-
     color_class, nse_sentiment = "val-black", "Neutral"
-
     
-
-    if act is not None and est is not None and str(act).strip() != "":
-
+    if pd.notna(act) and str(act).strip() != "" and str(act).lower() not in ['none', 'nan']:
         try:
-
             a, e = float(act), float(est)
-
             if a == e: return pd.Series(["val-black", "Neutral"])
-
+            direction = next((v for k, v in BENCHMARK_LOGIC.items() if k in event), 1)
+            is_pos = (a > e and direction == 1) or (a < e and direction == -1)
+            color_class = "val-green" if is_pos else "val-red"
             
-
-            # Find Benchmarking (Higher Better or Higher Worse)
-
-            direction = 0
-
-            for key, val in BENCHMARK_LOGIC.items():
-
-                if key in event:
-
-                    direction = val
-
-                    break
-
-            if direction == 0: direction = 1
-
-            
-
-            is_positive_data = (a > e and direction == 1) or (a < e and direction == -1)
-
-            color_class = "val-green" if is_positive_data else "val-red"
-
-                
-
-            # --- GLOBAL NIFTY IMPACT LOGIC ---
-
-            if country == 'IN':
-
-                nse_sentiment = "Bullish" if is_positive_data else "Bearish"
-
-            
-
-            elif country == 'US':
-
-                # Strong US data = High Rates/Yields = FII outflow from India
-
-                nse_sentiment = "Bearish" if is_positive_data else "Bullish"
-
-            
-
-            elif country == 'CN':
-
-                # Strong China data = Capital Rotation away from India
-
-                nse_sentiment = "Bearish" if is_positive_data else "Bullish"
-
-            
-
-            elif country in ['EU', 'GB']:
-
-                # Strong Europe/UK = Higher Export Demand (IT/Pharma)
-
-                nse_sentiment = "Bullish" if is_positive_data else "Bearish"
-
-            
-
-            elif country == 'JP':
-
-                # Japan Carry Trade Logic: Weak Japan (Bullish data) = Potential rate hikes 
-
-                # = Unwinding of carry trade = Bearish for Emerging Markets like India
-
-                nse_sentiment = "Bearish" if is_positive_data else "Bullish"
-
-                
-
+            if country == 'IN': nse_sentiment = "Bullish" if is_pos else "Bearish"
+            elif country == 'US' or country == 'CN': nse_sentiment = "Bearish" if is_pos else "Bullish"
+            elif country in ['EU', 'GB']: nse_sentiment = "Bullish" if is_pos else "Bearish"
+            elif country == 'JP': nse_sentiment = "Bearish" if is_pos else "Bullish"
         except: pass
-
     return pd.Series([color_class, nse_sentiment])
 
-
-
-# --- 5. DATA FETCH ---
-
-@st.cache_data(ttl=60)
-
+# --- 5. DATA FETCH (Resilient) ---
+@st.cache_data(ttl=20)
 def get_live_data(dt):
+    try:
+        url = f"https://financialmodelingprep.com/stable/economic-calendar"
+        params = {"from": dt, "to": dt, "apikey": MY_API_KEY}
+        res = requests.get(url, params=params, timeout=10)
+        return pd.DataFrame(res.json()) if res.status_code == 200 else pd.DataFrame()
+    except:
+        return pd.DataFrame()
 
-    url = f"https://financialmodelingprep.com/stable/economic-calendar"
-
-    params = {"from": dt, "to": dt, "apikey": MY_API_KEY}
-
-    res = requests.get(url, params=params)
-
-    return pd.DataFrame(res.json()) if res.status_code == 200 else pd.DataFrame()
-
-
-
-df = get_live_data(target_date.strftime("%Y-%m-%d"))
-
-
-
-# --- 6. RENDER CALENDAR ---
-
+# --- 6. DISPLAY ---
 st.title(f"🌍 Global Nifty Macro Calendar")
+placeholder = st.empty()
 
-st.caption(f"Status: Live | Updated: {time.strftime('%H:%M:%S')}")
-
-
-
-if not df.empty:
-
-    # Run Logic
-
-    df[['Color', 'NSE_Sent']] = df.apply(calculate_nse_global_logic, axis=1)
-
+with placeholder.container():
+    df = get_live_data(target_date.strftime("%Y-%m-%d"))
     
+    if not df.empty:
+        df[['Color', 'NSE_Sent']] = df.apply(calculate_nse_global_logic, axis=1)
+        df = df[df['impact'].isin(impact_filter)]
+        if country_filter:
+            df = df[df['country'].isin(country_filter)]
 
-    # Apply Persistent Filters
-
-    df = df[df['impact'].isin(impact_filter)]
-
-    if country_filter:
-
-        df = df[df['country'].isin(country_filter)]
-
-
-
-    # Header Row
-
-    st.markdown("""
-
-        <div class="ff-row" style="background:#f4f4f4; border-top:2px solid #333;">
-
-            <div style="width:10%" class="ff-header-text">Time</div>
-
-            <div style="width:8%" class="ff-header-text">Cur</div>
-
-            <div style="width:8%" class="ff-header-text">Imp</div>
-
-            <div style="width:40%" class="ff-header-text">Detail</div>
-
-            <div style="width:11%" class="ff-header-text">Actual</div>
-
-            <div style="width:11%" class="ff-header-text">Forecast</div>
-
-            <div style="width:12%" class="ff-header-text">Nifty Impact</div>
-
-        </div>
-
-    """, unsafe_allow_html=True)
-
-
-
-    for _, row in df.sort_values('date').iterrows():
-
-        time_str = row['date'].split(" ")[1][:5] if " " in row['date'] else "Day"
-
-        icon = "🔴" if row['impact'] == 'High' else "🟠" if row['impact'] == 'Medium' else "🟡"
-
-        curr_map = {'IN':'INR', 'US':'USD', 'CN':'CNY', 'EU':'EUR', 'GB':'GBP', 'JP':'JPY'}
-
-        curr = curr_map.get(row['country'], row['country'])
-
+        st.markdown(f"**Last Sync:** {time.strftime('%H:%M:%S')}")
         
-
-        sent_color = "#00ff41" if row['NSE_Sent'] == "Bullish" else "#ff4b4b" if row['NSE_Sent'] == "Bearish" else "#808495"
-
-        sent_label = f"<span style='color:{sent_color}; font-weight:bold;'>{row['NSE_Sent']}</span>"
-
-
-
-        st.markdown(f"""
-
-            <div class="ff-row">
-
-                <div style="width:10%">{time_str}</div>
-
-                <div style="width:8%; font-weight:bold;">{curr}</div>
-
-                <div style="width:8%">{icon}</div>
-
-                <div style="width:40%">{row['event']}</div>
-
-                <div style="width:11%" class="{row['Color']}">{row['actual'] if row['actual'] else '⏳'}</div>
-
-                <div style="width:11%">{row['estimate'] if row['estimate'] else ''}</div>
-
-                <div style="width:12%">{sent_label}</div>
-
+        # Table
+        st.markdown("""
+            <div class="ff-row" style="background:#f4f4f4; border-top:2px solid #333;">
+                <div style="width:10%" class="ff-header-text">Time</div>
+                <div style="width:8%" class="ff-header-text">Cur</div>
+                <div style="width:8%" class="ff-header-text">Imp</div>
+                <div style="width:40%" class="ff-header-text">Detail</div>
+                <div style="width:11%" class="ff-header-text">Actual</div>
+                <div style="width:11%" class="ff-header-text">Forecast</div>
+                <div style="width:12%" class="ff-header-text">Nifty Impact</div>
             </div>
-
         """, unsafe_allow_html=True)
 
-else:
+        for _, row in df.sort_values('date').iterrows():
+            time_str = row['date'].split(" ")[1][:5] if " " in row['date'] else "Day"
+            icon = "🔴" if row['impact'] == 'High' else "🟠" if row['impact'] == 'Medium' else "🟡"
+            curr_map = {'IN':'INR', 'US':'USD', 'CN':'CNY', 'EU':'EUR', 'GB':'GBP', 'JP':'JPY'}
+            curr = curr_map.get(row['country'], row['country'])
+            
+            s_color = "#00ff41" if row['NSE_Sent'] == "Bullish" else "#ff4b4b" if row['NSE_Sent'] == "Bearish" else "#808495"
+            s_label = f"<span style='color:{s_color}; font-weight:bold;'>{row['NSE_Sent']}</span>"
+            act_disp = row['actual'] if pd.notna(row['actual']) and str(row['actual']).strip() != "" else "⏳"
 
-    st.info("No market events found for this selection.")
+            st.markdown(f"""
+                <div class="ff-row">
+                    <div style="width:10%">{time_str}</div>
+                    <div style="width:8%; font-weight:bold;">{curr}</div>
+                    <div style="width:8%">{icon}</div>
+                    <div style="width:40%">{row['event']}</div>
+                    <div style="width:11%" class="{row['Color']}">{act_disp}</div>
+                    <div style="width:11%">{row['estimate'] if pd.notna(row['estimate']) else ''}</div>
+                    <div style="width:12%">{s_label}</div>
+                </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.warning("Fetching data... or no events today.")
 
-
-
-
-
-the acutual data is not updating in running market it is updating after marekt close
+# --- 7. AUTO-RERUN (FIXED) ---
+if live_mode:
+    time.sleep(30)
+    st.rerun()
