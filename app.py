@@ -24,30 +24,13 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. BENCHMARK LOGIC ---
+# --- 2. LOGIC ENGINE ---
 BENCHMARK_LOGIC = {
     "cpi": -1, "inflation": -1, "ppi": -1, "unemployment": -1, "jobless": -1,
     "gdp": 1, "pmi": 1, "sales": 1, "production": 1, "confidence": 1,
     "payroll": 1, "earnings": 1, "sentiment": 1, "order": 1
 }
 
-# --- 3. SIDEBAR ---
-st.sidebar.title("Global Controls")
-live_mode = st.sidebar.toggle("Live Market Mode (Auto-Refresh)", value=True)
-
-if st.sidebar.button("🔄 Force Refresh Now"):
-    st.cache_data.clear()
-    st.rerun()
-
-target_date = st.sidebar.date_input("Calendar Date", value=date.today())
-impact_filter = st.sidebar.multiselect("Impact", ['High', 'Medium', 'Low'], default=['High', 'Medium'])
-country_filter = st.sidebar.multiselect(
-    "Nifty Drivers", 
-    ['IN', 'US', 'CN', 'EU', 'GB', 'JP'], 
-    default=['IN', 'US', 'CN', 'EU', 'JP', 'GB']
-)
-
-# --- 4. ENGINE ---
 def calculate_nse_global_logic(row):
     event = str(row.get('event', '')).lower()
     country = str(row.get('country', '')).upper()
@@ -63,13 +46,13 @@ def calculate_nse_global_logic(row):
             color_class = "val-green" if is_pos else "val-red"
             
             if country == 'IN': nse_sentiment = "Bullish" if is_pos else "Bearish"
-            elif country == 'US' or country == 'CN': nse_sentiment = "Bearish" if is_pos else "Bullish"
+            elif country in ['US', 'CN']: nse_sentiment = "Bearish" if is_pos else "Bullish"
             elif country in ['EU', 'GB']: nse_sentiment = "Bullish" if is_pos else "Bearish"
             elif country == 'JP': nse_sentiment = "Bearish" if is_pos else "Bullish"
         except: pass
     return pd.Series([color_class, nse_sentiment])
 
-# --- 5. DATA FETCH (Resilient) ---
+# --- 3. DATA FETCH ---
 @st.cache_data(ttl=20)
 def get_live_data(dt):
     try:
@@ -80,22 +63,32 @@ def get_live_data(dt):
     except:
         return pd.DataFrame()
 
-# --- 6. DISPLAY ---
-st.title(f"🌍 Global Nifty Macro Calendar")
-placeholder = st.empty()
+# --- 4. SIDEBAR (CONTROLS) ---
+st.sidebar.title("Global Controls")
+target_date = st.sidebar.date_input("Calendar Date", value=date.today())
+impact_filter = st.sidebar.multiselect("Impact", ['High', 'Medium', 'Low'], default=['High', 'Medium'])
+country_filter = st.sidebar.multiselect(
+    "Nifty Drivers", 
+    ['IN', 'US', 'CN', 'EU', 'GB', 'JP'], 
+    default=['IN', 'US', 'CN', 'EU', 'JP', 'GB']
+)
+live_mode = st.sidebar.toggle("Auto-Refresh Dashboard", value=True)
 
-with placeholder.container():
-    df = get_live_data(target_date.strftime("%Y-%m-%d"))
+# --- 5. FRAGMENT (THIS PREVENTS THE LOADING STICK) ---
+@st.fragment(run_every="30s" if live_mode else None)
+def show_dashboard(dt, impacts, countries):
+    df = get_live_data(dt.strftime("%Y-%m-%d"))
     
+    st.title(f"🌍 Global Nifty Macro Calendar")
+    st.caption(f"Last Sync: {time.strftime('%H:%M:%S')}")
+
     if not df.empty:
         df[['Color', 'NSE_Sent']] = df.apply(calculate_nse_global_logic, axis=1)
-        df = df[df['impact'].isin(impact_filter)]
-        if country_filter:
-            df = df[df['country'].isin(country_filter)]
+        df = df[df['impact'].isin(impacts)]
+        if countries:
+            df = df[df['country'].isin(countries)]
 
-        st.markdown(f"**Last Sync:** {time.strftime('%H:%M:%S')}")
-        
-        # Table
+        # Header
         st.markdown("""
             <div class="ff-row" style="background:#f4f4f4; border-top:2px solid #333;">
                 <div style="width:10%" class="ff-header-text">Time</div>
@@ -130,9 +123,7 @@ with placeholder.container():
                 </div>
             """, unsafe_allow_html=True)
     else:
-        st.warning("Fetching data... or no events today.")
+        st.info("No market events found for this date.")
 
-# --- 7. AUTO-RERUN (FIXED) ---
-if live_mode:
-    time.sleep(30)
-    st.rerun()
+# Execute Dashboard
+show_dashboard(target_date, impact_filter, country_filter)
