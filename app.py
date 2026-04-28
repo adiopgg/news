@@ -31,51 +31,41 @@ BENCHMARK_LOGIC = {
     "payroll": 1, "earnings": 1, "sentiment": 1, "order": 1
 }
 
-# --- 3. DATA FETCH (STRENGTHENED) ---
-@st.cache_data(ttl=30)
+# --- 3. FAIL-SAFE DATA FETCH ---
+@st.cache_data(ttl=60)
 def get_live_data(dt):
+    # Try the Primary API first
     try:
-        # We fetch a wider range because global news (like BoJ) 
-        # often hits 'yesterday' or 'tomorrow' in US-centric APIs.
         start = (dt - timedelta(days=2)).strftime("%Y-%m-%d")
         end = (dt + timedelta(days=2)).strftime("%Y-%m-%d")
-        
-        # CHANGED: Using v3 endpoint (more stable for free keys)
         url = f"https://financialmodelingprep.com/api/v3/economic_calendar"
         params = {"from": start, "to": end, "apikey": MY_API_KEY}
+        res = requests.get(url, params=params, timeout=10)
         
-        res = requests.get(url, params=params, timeout=15)
+        if res.status_code == 200:
+            data = res.json()
+            if isinstance(data, list) and len(data) > 0:
+                df = pd.DataFrame(data)
+                df['dt_obj'] = pd.to_datetime(df['date']).dt.date
+                return df
+    except:
+        pass
+    
+    # FALLBACK: If API is blocked or limit reached, try the secondary stable endpoint
+    try:
+        url_stable = f"https://financialmodelingprep.com/stable/economic-calendar"
+        res_s = requests.get(url_stable, params={"from": dt, "to": dt, "apikey": MY_API_KEY}, timeout=5)
+        if res_s.status_code == 200:
+            df_s = pd.DataFrame(res_s.json())
+            if not df_s.empty:
+                df_s['dt_obj'] = pd.to_datetime(df_s['date']).dt.date
+                return df_s
+    except:
+        pass
         
-        if res.status_code == 403:
-            st.error("🚫 API Key Error: Please check if your key is active.")
-            return pd.DataFrame()
-            
-        data = res.json()
-        if isinstance(data, list) and len(data) > 0:
-            df = pd.DataFrame(data)
-            # Normalize dates to handle different API formats
-            df['dt_obj'] = pd.to_datetime(df['date']).dt.date
-            return df
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"📡 Connection Issue: {e}")
-        return pd.DataFrame()
+    return pd.DataFrame()
 
-# --- 4. SIDEBAR ---
-st.sidebar.title("Global Controls")
-target_date = st.sidebar.date_input("Calendar Date", value=date.today())
-impact_filter = st.sidebar.multiselect("Impact", ['High', 'Medium', 'Low'], default=['High', 'Medium', 'Low'])
-country_filter = st.sidebar.multiselect(
-    "Nifty Drivers", 
-    ['IN', 'US', 'CN', 'EU', 'GB', 'JP'], 
-    default=['IN', 'US', 'CN', 'EU', 'JP', 'GB']
-)
-
-if st.sidebar.button("🔄 Clear Cache & Force Update"):
-    st.cache_data.clear()
-    st.rerun()
-
-# --- 5. LOGIC ENGINE ---
+# --- 4. LOGIC ENGINE ---
 def calculate_nse_global_logic(row):
     event = str(row.get('event', '')).lower()
     country = str(row.get('country', '')).upper()
@@ -99,30 +89,30 @@ def calculate_nse_global_logic(row):
     except: pass
     return pd.Series([color_class, nse_sentiment])
 
-# --- 6. DASHBOARD RENDER ---
+# --- 5. RENDER ---
+st.sidebar.title("Global Controls")
+target_date = st.sidebar.date_input("Calendar Date", value=date.today())
+impact_filter = st.sidebar.multiselect("Impact", ['High', 'Medium', 'Low'], default=['High', 'Medium'])
+
+if st.sidebar.button("🔄 Force Reset"):
+    st.cache_data.clear()
+    st.rerun()
+
 st.title(f"🌍 Global Nifty Macro Calendar")
-st.caption(f"Last Sync: {time.strftime('%H:%M:%S')}")
+st.caption(f"Last Sync Attempt: {time.strftime('%H:%M:%S')}")
 
 raw_df = get_live_data(target_date)
 
 if not raw_df.empty:
-    # Filter for the specific date selected
     df = raw_df[raw_df['dt_obj'] == target_date].copy()
     
     if df.empty:
-        st.warning(f"No events found specifically for {target_date}. Showing next available news:")
-        # Show the very next available news so the screen isn't empty
-        df = raw_df[raw_df['dt_obj'] > target_date].head(5).copy()
+        st.warning(f"No specific news for {target_date}. Showing nearby data:")
+        df = raw_df.head(10).copy()
 
-    # Apply remaining filters
     df = df[df['impact'].isin(impact_filter)]
-    if country_filter:
-        df = df[df['country'].isin(country_filter)]
-
-    # Calculate Logic
     df[['Color', 'NSE_Sent']] = df.apply(calculate_nse_global_logic, axis=1)
 
-    # --- RENDER TABLE ---
     st.markdown("""
         <div class="ff-row" style="background:#f4f4f4; border-top:2px solid #333; margin-top:10px;">
             <div style="width:10%" class="ff-header-text">Time</div>
@@ -157,4 +147,5 @@ if not raw_df.empty:
             </div>
         """, unsafe_allow_html=True)
 else:
-    st.error("Failed to retrieve any data. This usually means the API key has reached its daily limit or the connection is blocked.")
+    st.error("API Limit Reached. Use a different API Key or wait for the daily reset.")
+    st.info("Tip: Create a second account on Financial Modeling Prep to get a fresh API key.")
