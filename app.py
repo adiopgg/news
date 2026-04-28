@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import date
+from datetime import date, timedelta
 import time
 
 # ==========================================
@@ -12,19 +12,7 @@ MY_API_KEY = "akr4lUAIsmZqm0lTH60LPdGhCbnxeICg"
 
 st.set_page_config(page_title="Global Macro: Nifty Impact", layout="wide")
 
-# --- 1. AUTO-REFRESH LOGIC (CRITICAL FOR LIVE MARKET) ---
-# This forces the script to rerun every 30 seconds automatically
-if "last_update" not in st.session_state:
-    st.session_state.last_update = time.time()
-
-# Add a toggle for Live Updates
-live_mode = st.sidebar.toggle("Live Market Mode (Auto-Refresh)", value=True)
-if live_mode:
-    time.sleep(30) # Wait 30 seconds
-    st.cache_data.clear() # Clear cache to fetch fresh API data
-    st.rerun()
-
-# --- 2. UI STYLING ---
+# --- 1. UI STYLING ---
 st.markdown("""
     <style>
     .main { background: #ffffff; color: #333; }
@@ -36,17 +24,18 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. THE LOGIC MAP ---
+# --- 2. THE LOGIC MAP (Benchmarking Higher/Lower) ---
 BENCHMARK_LOGIC = {
     "cpi": -1, "inflation": -1, "ppi": -1, "unemployment": -1, "jobless": -1,
     "gdp": 1, "pmi": 1, "sales": 1, "production": 1, "confidence": 1,
     "payroll": 1, "earnings": 1, "sentiment": 1, "order": 1
 }
 
-# --- 4. SIDEBAR CONTROLS ---
+# --- 3. SIDEBAR CONTROLS (Persistent State) ---
 st.sidebar.title("Global Controls")
 
-if st.sidebar.button("🔄 Force Manual Refresh"):
+# REFRESH FIX: Clear cache but keep widget state
+if st.sidebar.button("🔄 Force Refresh Data"):
     st.cache_data.clear()
 
 target_date = st.sidebar.date_input("Calendar Date", value=date.today())
@@ -57,55 +46,78 @@ country_filter = st.sidebar.multiselect(
     default=['IN', 'US', 'CN', 'EU', 'JP', 'GB']
 )
 
-# --- 5. LOGIC ENGINE ---
+# --- 4. MULTI-COUNTRY NSE LOGIC ENGINE ---
 def calculate_nse_global_logic(row):
     event = str(row.get('event', '')).lower()
     country = str(row.get('country', '')).upper()
     act, est = row.get('actual'), row.get('estimate')
+    
     color_class, nse_sentiment = "val-black", "Neutral"
     
     if act is not None and est is not None and str(act).strip() != "":
         try:
             a, e = float(act), float(est)
             if a == e: return pd.Series(["val-black", "Neutral"])
+            
+            # Find Benchmarking (Higher Better or Higher Worse)
             direction = 0
             for key, val in BENCHMARK_LOGIC.items():
-                if key in event: direction = val; break
+                if key in event:
+                    direction = val
+                    break
             if direction == 0: direction = 1
             
             is_positive_data = (a > e and direction == 1) or (a < e and direction == -1)
             color_class = "val-green" if is_positive_data else "val-red"
                 
-            if country == 'IN': nse_sentiment = "Bullish" if is_positive_data else "Bearish"
-            elif country == 'US': nse_sentiment = "Bearish" if is_positive_data else "Bullish"
-            elif country == 'CN': nse_sentiment = "Bearish" if is_positive_data else "Bullish"
-            elif country in ['EU', 'GB']: nse_sentiment = "Bullish" if is_positive_data else "Bearish"
-            elif country == 'JP': nse_sentiment = "Bearish" if is_positive_data else "Bullish"
+            # --- GLOBAL NIFTY IMPACT LOGIC ---
+            if country == 'IN':
+                nse_sentiment = "Bullish" if is_positive_data else "Bearish"
+            
+            elif country == 'US':
+                # Strong US data = High Rates/Yields = FII outflow from India
+                nse_sentiment = "Bearish" if is_positive_data else "Bullish"
+            
+            elif country == 'CN':
+                # Strong China data = Capital Rotation away from India
+                nse_sentiment = "Bearish" if is_positive_data else "Bullish"
+            
+            elif country in ['EU', 'GB']:
+                # Strong Europe/UK = Higher Export Demand (IT/Pharma)
+                nse_sentiment = "Bullish" if is_positive_data else "Bearish"
+            
+            elif country == 'JP':
+                # Japan Carry Trade Logic: Weak Japan (Bullish data) = Potential rate hikes 
+                # = Unwinding of carry trade = Bearish for Emerging Markets like India
+                nse_sentiment = "Bearish" if is_positive_data else "Bullish"
+                
         except: pass
     return pd.Series([color_class, nse_sentiment])
 
-# --- 6. DATA FETCH (Bypassing Internal Cache) ---
-@st.cache_data(ttl=30) # Cache only for 30 seconds
+# --- 5. DATA FETCH ---
+@st.cache_data(ttl=60)
 def get_live_data(dt):
-    # Added a 'timestamp' param to prevent the API from sending cached data
     url = f"https://financialmodelingprep.com/stable/economic-calendar"
-    params = {"from": dt, "to": dt, "apikey": MY_API_KEY, "_v": time.time()} 
+    params = {"from": dt, "to": dt, "apikey": MY_API_KEY}
     res = requests.get(url, params=params)
     return pd.DataFrame(res.json()) if res.status_code == 200 else pd.DataFrame()
 
 df = get_live_data(target_date.strftime("%Y-%m-%d"))
 
-# --- 7. RENDER ---
+# --- 6. RENDER CALENDAR ---
 st.title(f"🌍 Global Nifty Macro Calendar")
-st.caption(f"Status: {'🟢 LIVE Mode' if live_mode else '⚪ Static Mode'} | Last Update: {time.strftime('%H:%M:%S')}")
+st.caption(f"Status: Live | Updated: {time.strftime('%H:%M:%S')}")
 
 if not df.empty:
+    # Run Logic
     df[['Color', 'NSE_Sent']] = df.apply(calculate_nse_global_logic, axis=1)
+    
+    # Apply Persistent Filters
     df = df[df['impact'].isin(impact_filter)]
     if country_filter:
         df = df[df['country'].isin(country_filter)]
 
-    # Table Header
+    # Header Row
     st.markdown("""
         <div class="ff-row" style="background:#f4f4f4; border-top:2px solid #333;">
             <div style="width:10%" class="ff-header-text">Time</div>
@@ -139,4 +151,4 @@ if not df.empty:
             </div>
         """, unsafe_allow_html=True)
 else:
-    st.info("No data found for this selection.")
+    st.info("No market events found for this selection.")
