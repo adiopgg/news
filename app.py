@@ -7,7 +7,6 @@ import time
 # ==========================================
 # 🔑 API CONFIG
 # ==========================================
-# Use st.secrets["FMP_API_KEY"] if hosting on Streamlit Cloud
 MY_API_KEY = "akr4lUAIsmZqm0lTH60LPdGhCbnxeICg"
 # ==========================================
 
@@ -22,7 +21,6 @@ st.markdown("""
     .val-green { color: #008000; font-weight: bold; }
     .val-red { color: #cc0000; font-weight: bold; }
     .val-black { color: #000000; }
-    .stButton>button { width: 100%; border-radius: 5px; height: 3em; background-color: #f0f2f6; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -33,14 +31,13 @@ BENCHMARK_LOGIC = {
     "payroll": 1, "earnings": 1, "sentiment": 1, "order": 1
 }
 
-# --- 3. CORE LOGIC ENGINE ---
+# --- 3. LOGIC ENGINE ---
 def calculate_nse_global_logic(row):
     event = str(row.get('event', '')).lower()
     country = str(row.get('country', '')).upper()
     act, est = row.get('actual'), row.get('estimate')
     color_class, nse_sentiment = "val-black", "Neutral"
     
-    # Handle missing/NaN data
     if pd.isna(act) or str(act).strip() == "" or str(act).lower() in ['none', 'nan']:
         return pd.Series([color_class, nse_sentiment])
 
@@ -48,7 +45,6 @@ def calculate_nse_global_logic(row):
         a, e = float(act), float(est)
         if a == e: return pd.Series(["val-black", "Neutral"])
         
-        # Determine if Higher is Better (1) or Higher is Worse (-1)
         direction = next((v for k, v in BENCHMARK_LOGIC.items() if k in event), 1)
         is_pos = (a > e and direction == 1) or (a < e and direction == -1)
         color_class = "val-green" if is_pos else "val-red"
@@ -60,20 +56,31 @@ def calculate_nse_global_logic(row):
     except: pass
     return pd.Series([color_class, nse_sentiment])
 
-# --- 4. DATA FETCH ---
+# --- 4. DATA FETCH (3-DAY SAFETY WINDOW) ---
 @st.cache_data(ttl=20)
 def get_live_data(dt):
     try:
-        url = f"https://financialmodelingprep.com/stable/economic-calendar"
-        params = {"from": dt, "to": dt, "apikey": MY_API_KEY}
-        # Force fresh data via headers
-        headers = {"Cache-Control": "no-cache", "Pragma": "no-cache"}
+        # Fetch window: Yesterday to Tomorrow
+        start = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
+        end = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        url = "https://financialmodelingprep.com/stable/economic-calendar"
+        params = {"from": start, "to": end, "apikey": MY_API_KEY}
+        headers = {"Cache-Control": "no-cache"}
+        
         res = requests.get(url, params=params, headers=headers, timeout=10)
-        return pd.DataFrame(res.json()) if res.status_code == 200 else pd.DataFrame()
+        if res.status_code == 200:
+            full_df = pd.DataFrame(res.json())
+            if not full_df.empty:
+                # Convert API date strings to actual date objects for comparison
+                full_df['dt_obj'] = pd.to_datetime(full_df['date']).dt.date
+                # Only return the rows that match the user's selected date
+                return full_df[full_df['dt_obj'] == dt]
+        return pd.DataFrame()
     except:
         return pd.DataFrame()
 
-# --- 5. SIDEBAR (CONTROLS) ---
+# --- 5. SIDEBAR ---
 st.sidebar.title("Global Controls")
 target_date = st.sidebar.date_input("Calendar Date", value=date.today())
 impact_filter = st.sidebar.multiselect("Impact", ['High', 'Medium', 'Low'], default=['High', 'Medium'])
@@ -90,13 +97,13 @@ if st.sidebar.button("🔄 Force Refresh API"):
     st.cache_data.clear()
     st.rerun()
 
-# --- 6. DASHBOARD FRAGMENT (PREVENTS HANGING) ---
+# --- 6. DASHBOARD FRAGMENT ---
 @st.fragment(run_every="30s" if live_mode else None)
 def show_dashboard(dt, impacts, countries):
-    df = get_live_data(dt.strftime("%Y-%m-%d"))
+    df = get_live_data(dt)
     
     st.title(f"🌍 Global Nifty Macro Calendar")
-    st.caption(f"Last Sync: {time.strftime('%H:%M:%S')} | Date: {dt.strftime('%d %b %Y')}")
+    st.caption(f"Last Sync: {time.strftime('%H:%M:%S')} | Target: {dt.strftime('%d %b %Y')}")
 
     if not df.empty:
         # Initial Logic Run
@@ -107,17 +114,7 @@ def show_dashboard(dt, impacts, countries):
         if countries:
             df = df[df['country'].isin(countries)]
 
-        # --- MANUAL OVERRIDE SECTION ---
-        with st.expander("⚡ Manual News Override (If API is lagging)"):
-            col_ov1, col_ov2 = st.columns(2)
-            ov_event = col_ov1.selectbox("Select Event", ["None"] + df['event'].tolist())
-            ov_val = col_ov2.text_input("Enter Actual Value (e.g. 5.2)")
-            if st.button("Apply Manual Number"):
-                if ov_event != "None" and ov_val:
-                    df.loc[df['event'] == ov_event, 'actual'] = ov_val
-                    df[['Color', 'NSE_Sent']] = df.apply(calculate_nse_global_logic, axis=1)
-
-        # --- TABLE HEADER ---
+        # Table Header
         st.markdown("""
             <div class="ff-row" style="background:#f4f4f4; border-top:2px solid #333; margin-top:10px;">
                 <div style="width:10%" class="ff-header-text">Time</div>
@@ -130,7 +127,7 @@ def show_dashboard(dt, impacts, countries):
             </div>
         """, unsafe_allow_html=True)
 
-        # --- TABLE ROWS ---
+        # Table Rows
         for _, row in df.sort_values('date').iterrows():
             time_str = row['date'].split(" ")[1][:5] if " " in row['date'] else "Day"
             icon = "🔴" if row['impact'] == 'High' else "🟠" if row['impact'] == 'Medium' else "🟡"
@@ -140,7 +137,6 @@ def show_dashboard(dt, impacts, countries):
             s_color = "#00ff41" if row['NSE_Sent'] == "Bullish" else "#ff4b4b" if row['NSE_Sent'] == "Bearish" else "#808495"
             s_label = f"<span style='color:{s_color}; font-weight:bold;'>{row['NSE_Sent']}</span>"
             
-            # Use ⏳ for nan or empty
             act_val = row['actual']
             act_disp = act_val if pd.notna(act_val) and str(act_val).strip() != "" else "⏳"
 
@@ -156,7 +152,7 @@ def show_dashboard(dt, impacts, countries):
                 </div>
             """, unsafe_allow_html=True)
     else:
-        st.info("No data found for this date. Try changing the date or clearing cache.")
+        st.info("No data found for this specific date. Try selecting another date or hit refresh.")
 
-# Execute
+# Start
 show_dashboard(target_date, impact_filter, country_filter)
